@@ -783,7 +783,7 @@ class HanafudaClient {
         type: "confirm",
         name: "autoRepeat",
         message: this.colors.style(
-          "Auto repeat process every 1 hour?",
+          "Auto repeat process every 15 minutes?",
           "menuTitle"
         ),
         default: true,
@@ -815,7 +815,7 @@ class HanafudaClient {
           )
         );
 
-        const minutes = 60;
+        const minutes = 15;
         const totalSeconds = minutes * 60;
 
         process.stdout.write;

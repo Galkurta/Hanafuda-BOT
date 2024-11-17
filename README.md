@@ -90,7 +90,7 @@ node main.js
 2. **Grow and Garden**
    - Auto-collect grow rewards
    - Process garden rewards
-   - Auto-repeat every 1 hour (optional)
+   - Auto-repeat every 15 minutes (optional)
    - Milestone tracking
 
 ## Milestone Rewards
