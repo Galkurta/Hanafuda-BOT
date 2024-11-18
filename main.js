@@ -46,6 +46,25 @@ const TRANSACTION = {
   COUNTDOWN_DELAY: 5,
 };
 
+const GROW_LIMITS = [
+  { min: 1, max: 1, grow: 10 },
+  { min: 2, max: 2, grow: 11 },
+  { min: 3, max: 3, grow: 12 },
+  { min: 4, max: 4, grow: 13 },
+  { min: 5, max: 5, grow: 20 },
+  { min: 6, max: 6, grow: 21 },
+  { min: 7, max: 7, grow: 22 },
+  { min: 8, max: 8, grow: 23 },
+  { min: 9, max: 9, grow: 24 },
+  { min: 10, max: 19, grow: 30 },
+  { min: 20, max: 29, grow: 40 },
+  { min: 30, max: 49, grow: 50 },
+  { min: 50, max: 99, grow: 75 },
+  { min: 100, max: 999, grow: 100 },
+  { min: 1000, max: 4999, grow: 200 },
+  { min: 5000, max: Infinity, grow: 300 },
+];
+
 const CONTRACT_ABI = [
   {
     constant: false,
@@ -152,6 +171,14 @@ class HanafudaClient {
   formatAddress(address) {
     return `${address.slice(0, 6)}...${address.slice(-4)}`;
   }
+
+  async getMaximumGrow(deposits) {
+    const limit = GROW_LIMITS.find(
+      (limit) => deposits >= limit.min && deposits <= limit.max
+    );
+    return limit ? limit.grow : 0;
+  }
+
   async getNextMilestone(deposit, headers) {
     try {
       const response = await axios.post(
@@ -329,6 +356,7 @@ class HanafudaClient {
     );
     return gasPrice;
   }
+
   async syncTransaction(txHash, refreshToken) {
     let authToken = await this.refreshTokenHandler(refreshToken);
 
@@ -524,6 +552,7 @@ class HanafudaClient {
       });
     }
   }
+
   async handleGrowAndGarden(refreshToken) {
     try {
       const accessToken = await this.refreshTokenHandler(refreshToken);
@@ -549,6 +578,9 @@ class HanafudaClient {
       const garden =
         userData.getGardenForCurrentUser.gardenStatus.gardenRewardActionCount;
 
+      // Get maximum possible grow
+      const maxGrow = await this.getMaximumGrow(deposit);
+
       logger.info(
         `${this.colors.style("Points", "label")}: ${this.colors.style(
           balance.toLocaleString(),
@@ -565,7 +597,7 @@ class HanafudaClient {
         `${this.colors.style("Grow", "label")}: ${this.colors.style(
           grow.toString(),
           "value"
-        )}`
+        )} / ${this.colors.style(maxGrow.toString(), "value")}`
       );
       logger.info(
         `${this.colors.style("Garden", "label")}: ${this.colors.style(
@@ -663,6 +695,7 @@ class HanafudaClient {
       }
     }
   }
+
   async promptTransactionDetails() {
     const answers = await inquirer.prompt([
       {
