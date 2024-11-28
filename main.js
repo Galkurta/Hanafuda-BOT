@@ -14,10 +14,26 @@ import { logger } from "./config/logger.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const NETWORK = {
-  RPC_URL: "https://mainnet.base.org",
-  CHAIN_ID: 8453,
-  CONTRACT_ADDRESS: "0xC5bf05cD32a14BFfb705Fb37a9d218895187376c",
+const NETWORKS = {
+  BASE: {
+    name: "Base",
+    RPC_URL: "https://mainnet.base.org",
+    CHAIN_ID: 8453,
+    CONTRACT_ADDRESS: "0xC5bf05cD32a14BFfb705Fb37a9d218895187376c",
+    EXPLORER_URL: "https://basescan.org",
+    FEE_THRESHOLD: 0.0000006,
+    DEFAULT_AMOUNT: "0.0000000000001",
+  },
+  POLYGON: {
+    name: "Polygon",
+    RPC_URL: "https://polygon-rpc.com",
+    CHAIN_ID: 137,
+    CONTRACT_ADDRESS: "0xC5bf05cD32a14BFfb705Fb37a9d218895187376c",
+    EXPLORER_URL: "https://polygonscan.com",
+    FEE_THRESHOLD: 0.0014,
+    GAS_PRICE: "0.00000003",
+    DEFAULT_AMOUNT: "0.0000000000001",
+  },
 };
 
 const FILES = {
@@ -143,18 +159,20 @@ const GRAPHQL_QUERIES = {
 
 class HanafudaClient {
   constructor() {
-    this.initializeWeb3();
     this.colors = new ColorTheme();
+    this.selectedNetwork = null;
   }
 
   initializeWeb3() {
-    this.web3 = new Web3(NETWORK.RPC_URL);
+    if (!this.selectedNetwork) {
+      throw new Error("Network not selected");
+    }
+    this.web3 = new Web3(this.selectedNetwork.RPC_URL);
     this.contract = new this.web3.eth.Contract(
       CONTRACT_ABI,
-      NETWORK.CONTRACT_ADDRESS
+      this.selectedNetwork.CONTRACT_ADDRESS
     );
   }
-
   formatPrivateKey(privateKey) {
     const trimmed = privateKey.trim();
     return trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
@@ -162,7 +180,7 @@ class HanafudaClient {
 
   formatTxUrl(txHash) {
     const cleanHash = txHash.replace("0x", "");
-    const baseUrl = "https://basescan.org";
+    const baseUrl = this.selectedNetwork.EXPLORER_URL;
     const fullUrl = `${baseUrl}/tx/0x${cleanHash}#eventlog`;
     const shortHash = `${cleanHash.slice(0, 6)}...${cleanHash.slice(-4)}`;
     return terminalLink(shortHash, fullUrl);
@@ -330,15 +348,29 @@ class HanafudaClient {
 
   async waitForLowerFee(gasLimit) {
     let gasPrice, txnFeeInEther;
+    const networkFeeThreshold = this.selectedNetwork.FEE_THRESHOLD;
+
     do {
-      gasPrice = await this.web3.eth.getGasPrice();
-      const txnFee = gasPrice * gasLimit;
+      if (
+        this.selectedNetwork.name === "Polygon" &&
+        this.selectedNetwork.GAS_PRICE
+      ) {
+        gasPrice = BigInt(
+          this.web3.utils.toWei(this.selectedNetwork.GAS_PRICE, "ether")
+        );
+      } else {
+        gasPrice = BigInt(await this.web3.eth.getGasPrice());
+      }
+
+      const txnFee = gasPrice * BigInt(gasLimit);
       txnFeeInEther = this.web3.utils.fromWei(txnFee.toString(), "ether");
 
-      if (parseFloat(txnFeeInEther) > TRANSACTION.FEE_THRESHOLD) {
+      if (parseFloat(txnFeeInEther) > networkFeeThreshold) {
         logger.info(
           this.colors.style(
-            `Current fee: ${txnFeeInEther} ETH - Waiting for lower fee`,
+            `Current fee: ${txnFeeInEther} ${
+              this.selectedNetwork.name === "Polygon" ? "POL" : "ETH"
+            } - Waiting for lower fee`,
             "waiting"
           )
         );
@@ -346,15 +378,17 @@ class HanafudaClient {
           setTimeout(resolve, TRANSACTION.RETRY_DELAY)
         );
       }
-    } while (parseFloat(txnFeeInEther) > TRANSACTION.FEE_THRESHOLD);
+    } while (parseFloat(txnFeeInEther) > networkFeeThreshold);
 
     logger.success(
       this.colors.style(
-        `Acceptable fee found: ${txnFeeInEther} ETH`,
+        `Acceptable fee found: ${txnFeeInEther} ${
+          this.selectedNetwork.name === "Polygon" ? "POL" : "ETH"
+        }`,
         "complete"
       )
     );
-    return gasPrice;
+    return gasPrice.toString();
   }
 
   async syncTransaction(txHash, refreshToken) {
@@ -367,7 +401,7 @@ class HanafudaClient {
           {
             query: GRAPHQL_QUERIES.SYNC_ETH_TX,
             variables: {
-              chainId: NETWORK.CHAIN_ID,
+              chainId: this.selectedNetwork.CHAIN_ID,
               txHash: txHash,
             },
             operationName: "SyncEthereumTx",
@@ -509,7 +543,7 @@ class HanafudaClient {
 
     const tx = {
       from: fromAddress,
-      to: NETWORK.CONTRACT_ADDRESS,
+      to: this.selectedNetwork.CONTRACT_ADDRESS,
       value: amountInWei,
       gas: gasLimit,
       gasPrice: gasPrice,
@@ -717,7 +751,9 @@ class HanafudaClient {
         type: "confirm",
         name: "useDefault",
         message: this.colors.style(
-          `Use default amount of ${TRANSACTION.DEFAULT_AMOUNT} ETH?`,
+          `Use default amount of ${this.selectedNetwork.DEFAULT_AMOUNT} ${
+            this.selectedNetwork.name === "Polygon" ? "POL" : "ETH"
+          }?`,
           "menuTitle"
         ),
         default: true,
@@ -725,7 +761,12 @@ class HanafudaClient {
       {
         type: "number",
         name: "customAmount",
-        message: this.colors.style("Enter ETH amount to send:", "menuTitle"),
+        message: this.colors.style(
+          `Enter ${
+            this.selectedNetwork.name === "Polygon" ? "POL" : "ETH"
+          } amount to send:`,
+          "menuTitle"
+        ),
         when: (answers) => !answers.useDefault,
         validate: (value) => {
           if (value > 0) return true;
@@ -743,11 +784,44 @@ class HanafudaClient {
     return {
       numTx: answers.numTx,
       amountInEther: answers.useDefault
-        ? TRANSACTION.DEFAULT_AMOUNT
+        ? this.selectedNetwork.DEFAULT_AMOUNT
         : answers.customAmount.toString(),
       wallets,
       refreshTokens,
     };
+  }
+
+  async promptNetwork() {
+    const { network } = await inquirer.prompt([
+      {
+        type: "list",
+        name: "network",
+        message: this.colors.style("Select network:", "menuTitle"),
+        choices: [
+          {
+            name: this.colors.style(
+              `${NETWORKS.BASE.name} Network`,
+              "menuOption"
+            ),
+            value: NETWORKS.BASE,
+          },
+          {
+            name: this.colors.style(
+              `${NETWORKS.POLYGON.name} Network`,
+              "menuOption"
+            ),
+            value: NETWORKS.POLYGON,
+          },
+        ],
+      },
+    ]);
+    this.selectedNetwork = network;
+    console.log(
+      this.colors.style(
+        `Selected network: ${this.selectedNetwork.name}`,
+        "networkInfo"
+      )
+    );
   }
 
   async promptMode() {
@@ -878,6 +952,9 @@ class HanafudaClient {
   async run() {
     try {
       displayBanner();
+
+      await this.promptNetwork();
+      this.initializeWeb3();
 
       const mode = await this.promptMode();
 
