@@ -21,7 +21,6 @@ const NETWORKS = {
     CHAIN_ID: 8453,
     CONTRACT_ADDRESS: "0xC5bf05cD32a14BFfb705Fb37a9d218895187376c",
     EXPLORER_URL: "https://basescan.org",
-    FEE_THRESHOLD: 0.0000006,
     DEFAULT_AMOUNT: "0.0000000000001",
   },
   POLYGON: {
@@ -30,7 +29,6 @@ const NETWORKS = {
     CHAIN_ID: 137,
     CONTRACT_ADDRESS: "0xC5bf05cD32a14BFfb705Fb37a9d218895187376c",
     EXPLORER_URL: "https://polygonscan.com",
-    FEE_THRESHOLD: 0.0014,
     GAS_PRICE: "0.00000003",
     DEFAULT_AMOUNT: "0.0000000000001",
   },
@@ -55,8 +53,6 @@ const API = {
 };
 
 const TRANSACTION = {
-  FEE_THRESHOLD: 0.0000006,
-  DEFAULT_AMOUNT: "0.0000000000001",
   MAX_RETRIES: 4,
   RETRY_DELAY: 5000,
   COUNTDOWN_DELAY: 5,
@@ -173,6 +169,90 @@ class HanafudaClient {
       this.selectedNetwork.CONTRACT_ADDRESS
     );
   }
+
+  async findOptimalGasPrice() {
+    try {
+      // Get current network conditions
+      const latestBlock = await this.web3.eth.getBlock("latest");
+      const baseFee = BigInt(
+        latestBlock.baseFeePerGas || (await this.web3.eth.getGasPrice())
+      );
+      const currentGasPrice = BigInt(await this.web3.eth.getGasPrice());
+
+      // Convert to Gwei for display only
+      const baseFeeGwei = parseFloat(
+        this.web3.utils.fromWei(baseFee.toString(), "gwei")
+      );
+      const currentGasPriceGwei = parseFloat(
+        this.web3.utils.fromWei(currentGasPrice.toString(), "gwei")
+      );
+
+      // Use max between baseFee and current gas price, add 10% priority fee
+      // Convert to number first for Math.max, then back to BigInt
+      const baseGasPrice =
+        baseFee > currentGasPrice ? baseFee : currentGasPrice;
+      const priorityFee = (baseGasPrice * BigInt(10)) / BigInt(100); // 10% increase
+      const optimalGasPrice = baseGasPrice + priorityFee;
+
+      logger.info(
+        this.colors.style(
+          `Network Base Fee: ${baseFeeGwei.toFixed(2)} Gwei, ` +
+            `Current Gas Price: ${currentGasPriceGwei.toFixed(2)} Gwei`,
+          "info"
+        )
+      );
+
+      return optimalGasPrice.toString();
+    } catch (error) {
+      logger.warn(
+        this.colors.style(
+          `Error getting network gas price: ${error.message}. Using increased fallback.`,
+          "warning"
+        )
+      );
+      // Add 10% to fallback gas price
+      const fallbackGas = BigInt(await this.web3.eth.getGasPrice());
+      const increasedGas =
+        fallbackGas + (fallbackGas * BigInt(10)) / BigInt(100);
+      return increasedGas.toString();
+    }
+  }
+
+  async waitForLowerFee(gasLimit) {
+    try {
+      // Get network suggested gas price
+      const gasPrice = BigInt(await this.findOptimalGasPrice());
+
+      // Calculate fee
+      const txnFeeWei = gasPrice * BigInt(gasLimit);
+      const txnFeeEther = this.web3.utils.fromWei(
+        txnFeeWei.toString(),
+        "ether"
+      );
+      const gasPriceGwei = parseFloat(
+        this.web3.utils.fromWei(gasPrice.toString(), "gwei")
+      );
+
+      logger.info(
+        this.colors.style(
+          `Current Network Gas Price: ${gasPriceGwei.toFixed(2)} Gwei - ` +
+            `Estimated Fee: ${txnFeeEther} ${
+              this.selectedNetwork.name === "Polygon" ? "POL" : "ETH"
+            }`,
+          "info"
+        )
+      );
+
+      return gasPrice.toString();
+    } catch (error) {
+      logger.error(
+        this.colors.style(`Error checking gas price: ${error.message}`, "error")
+      );
+      // Return current gas price as fallback
+      return (await this.web3.eth.getGasPrice()).toString();
+    }
+  }
+
   formatPrivateKey(privateKey) {
     const trimmed = privateKey.trim();
     return trimmed.startsWith("0x") ? trimmed : `0x${trimmed}`;
@@ -346,55 +426,15 @@ class HanafudaClient {
     }
   }
 
-  async waitForLowerFee(gasLimit) {
-    let gasPrice, txnFeeInEther;
-    const networkFeeThreshold = this.selectedNetwork.FEE_THRESHOLD;
-
-    do {
-      if (
-        this.selectedNetwork.name === "Polygon" &&
-        this.selectedNetwork.GAS_PRICE
-      ) {
-        gasPrice = BigInt(
-          this.web3.utils.toWei(this.selectedNetwork.GAS_PRICE, "ether")
-        );
-      } else {
-        gasPrice = BigInt(await this.web3.eth.getGasPrice());
-      }
-
-      const txnFee = gasPrice * BigInt(gasLimit);
-      txnFeeInEther = this.web3.utils.fromWei(txnFee.toString(), "ether");
-
-      if (parseFloat(txnFeeInEther) > networkFeeThreshold) {
-        logger.info(
-          this.colors.style(
-            `Current fee: ${txnFeeInEther} ${
-              this.selectedNetwork.name === "Polygon" ? "POL" : "ETH"
-            } - Waiting for lower fee`,
-            "waiting"
-          )
-        );
-        await new Promise((resolve) =>
-          setTimeout(resolve, TRANSACTION.RETRY_DELAY)
-        );
-      }
-    } while (parseFloat(txnFeeInEther) > networkFeeThreshold);
-
-    logger.success(
-      this.colors.style(
-        `Acceptable fee found: ${txnFeeInEther} ${
-          this.selectedNetwork.name === "Polygon" ? "POL" : "ETH"
-        }`,
-        "complete"
-      )
-    );
-    return gasPrice.toString();
-  }
-
   async syncTransaction(txHash, refreshToken) {
     let authToken = await this.refreshTokenHandler(refreshToken);
+    const SYNC_DELAY = 2000; // Delay 2 detik antara retry
+    const MAX_SYNC_RETRIES = 10; // Menambah jumlah retry maksimum
 
-    for (let attempt = 1; attempt <= TRANSACTION.MAX_RETRIES; attempt++) {
+    // Tambah delay awal untuk memberikan waktu backend memproses
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    for (let attempt = 1; attempt <= MAX_SYNC_RETRIES; attempt++) {
       try {
         const response = await axios.post(
           API.GRAPHQL_URL,
@@ -411,6 +451,7 @@ class HanafudaClient {
               "Content-Type": "application/json",
               Authorization: authToken,
             },
+            timeout: 30000, // Menambah timeout ke 30 detik
           }
         );
 
@@ -438,10 +479,11 @@ class HanafudaClient {
           )
         );
 
-        if (attempt === 3) {
+        // Refresh token setiap 3 attempt
+        if (attempt % 3 === 0) {
           logger.info(
             this.colors.style(
-              "Attempting token refresh on 3rd retry",
+              `Attempting token refresh on attempt ${attempt}`,
               "progress"
             )
           );
@@ -450,26 +492,20 @@ class HanafudaClient {
             logger.success(
               this.colors.style("Token refreshed, retrying sync", "complete")
             );
-            attempt--;
             continue;
-          } else {
-            logger.error(
-              this.colors.style("Token refresh failed, aborting sync", "failed")
-            );
-            break;
           }
         }
 
-        if (attempt < TRANSACTION.MAX_RETRIES) {
+        if (attempt < MAX_SYNC_RETRIES) {
+          // Menggunakan exponential backoff untuk delay
+          const delay = SYNC_DELAY * Math.pow(1.5, attempt - 1);
           logger.info(
             this.colors.style(
-              `Retrying in ${TRANSACTION.RETRY_DELAY / 1000} seconds...`,
+              `Waiting ${(delay / 1000).toFixed(1)} seconds before retry...`,
               "waiting"
             )
           );
-          await new Promise((resolve) =>
-            setTimeout(resolve, TRANSACTION.RETRY_DELAY)
-          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
         }
       }
     }
@@ -979,13 +1015,13 @@ class HanafudaClient {
 
 process.on("unhandledRejection", (error) => {
   logger.error(
-    colors.style(`Unhandled promise rejection: ${error.message}`, "error")
+    this.colors.style(`Unhandled promise rejection: ${error.message}`, "error")
   );
   process.exit(1);
 });
 
 const client = new HanafudaClient();
 client.run().catch((error) => {
-  logger.error(colors.style("Fatal error: " + error.message, "error"));
+  logger.error(this.colors.style("Fatal error: " + error.message, "error"));
   process.exit(1);
 });
